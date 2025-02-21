@@ -1,5 +1,11 @@
 # SideLOADR
 
+---
+
+Fork of SideLOADR with the goal of increased evasion capabilities. (in progress)
+
+---
+
 A "simple" script to perform DLL sideloading using Python.
 
 See [Disclaimers](#disclaimers) for my references. Thanks
